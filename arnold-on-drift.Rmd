@@ -1,0 +1,169 @@
+---
+title: "Hey Arnold"
+author: "Filip Wästberg"
+date: "`r Sys.Date()`"
+output:
+  github_document:
+    pandoc_args: --webtex=http://chart.apis.google.com/chart?cht=tx&chl=
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, dpi = 300)
+```
+
+I en tidigare Notebook introducerade vi en alternativ algoritm till K2. Den heter `arnold` och är byggd på ett modellramverk som heter  `Generalized Additive Models (GAM)`. Modellen funkar på ungefär samma sätt som K2s nuvarande algoritm. Men istället för att anpassa en bruten linjär regression anpassar vi med hjälp av `GAM` *en* regressionslinje, som inte är linjär. Utöver det använder vi också en mer standardiserade metod än *standardavvikelsen* (som används i K2 idag) för att identifiera larm, den heter `Inter Quartile Range (iqr)`.
+
+Men i vår förra Notebook utgick vi från ganska enkel data. Nu är vi nyfikna på hur den här algoritmen fungerar på fjärrvärmeanvändning som driftar. Ett av skälen till att vi i K2 använder *referensdata* är att vi ska kunna upptäcka fjärrvärmeanvändning som driftar, så en ny algoritm måste kunna upptäcka det. En annan aspekt som `arnold` behöver kunna hantera är att det finns flera effektsignaturer. Ofta beror det här på olika användning under olika veckodagar. 
+
+Vi kommer utgå från ett exempeldata där en drift av flöde uppstår:
+
+```{r warning=FALSE, message=FALSE}
+library(tidyverse)
+filer <- list.files("data") %>% 
+  paste0("data/", .) %>% 
+  set_names()
+
+tds2 <- read_delim(filer[[1]], delim = ";")
+tds5 <- read_delim(filer[[2]], delim = ";")
+tds9 <- read_delim(filer[[3]], delim = ";")
+
+tds2 <- tds2 %>% 
+  mutate_all(~str_replace(., ",", ".")) %>% 
+  mutate_at(vars(value, consumption_value, temperature), as.numeric)
+
+tds5 <- tds5 %>% 
+  mutate_all(~str_replace(., ",", ".")) %>% 
+  mutate_at(vars(value, consumption_value, temperature), as.numeric)
+
+tds9 <- tds9 %>% 
+  mutate_all(~str_replace(., ",", ".")) %>% 
+  mutate_at(vars(value, consumption_value, temperature), as.numeric)
+
+data <- bind_rows(tds2, tds5, tds9) %>% 
+  filter(consumption_value > 0) %>% 
+  mutate(consumption_from = as.Date(consumption_from))
+
+tds5 <- data %>% 
+  filter(metering_point_id == "TDS5" & property == "flow") 
+
+tds5%>% 
+  ggplot(aes(consumption_from, consumption_value)) +
+  geom_point() +
+  geom_smooth(method = "gam", color = "orange") +
+  theme_minimal() +
+  labs(
+    title = "Driftande flöde"
+  )
+```
+
+Vi ser det här i effektsignaturen också:
+
+```{r}
+tds5%>% 
+  ggplot(aes(temperature, consumption_value)) +
+  geom_point() +
+  geom_smooth(method = "gam", color = "orange") +
+  theme_minimal() +
+  labs(
+    title = "Driftande flöde"
+  )
+```
+
+Vi ser att det finns två olika effektsignaturer i diagrammet. Just den här typen kallas ofta för "tvåstråkare".  K2 identiferar de två stråken genom att anpassa en bruten regressionslinje på hela datasettet och delar sedan in data i två grupper: de som är under linjen och de som är över linjen. Den anpassar sedan en ny bruten regression till respektive grupp och itererar. Det här finns utförligt beskrivet i en Notebook av Ida Lundholm Benzi på Data Science-portalen.
+
+```{r}
+tds5_ref <- tds5 %>% 
+  mutate(temp_interval = cut(temperature, c(-Inf, 2, 9, 15, 20, Inf)),
+         period = if_else(timestamp < "2014-01-01", "referensperiod", "testperiod")) %>% 
+  filter(period == "referensperiod")
+
+tds5_ref %>% 
+  ggplot(aes(temperature, consumption_value, color = temp_interval)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = "lm") +
+  theme_minimal() +
+  labs(
+    title = "K2 på referensdata"
+  )
+```
+
+`arnold` hanterar det här annorlunda. Istället för att identifiera grupperna i effektsignaturen utgår den från att det här i regel beror på olika konsumtion under olika dagar. 
+
+```{r}
+library(ggthemes)
+tds5 <- tds5 %>% 
+  mutate(weekday = weekdays(consumption_from))
+
+tds5 %>% 
+  ggplot(aes(temperature, consumption_value, color = weekday)) +
+  geom_point(alpha = 0.7) +
+  scale_color_colorblind()
+```
+
+Vi kan visualisera skillnaden mellan dagar: 
+
+```{r}
+tds5 %>% 
+  group_by(weekday) %>% 
+  summarise(median_consumption = median(consumption_value)) %>% 
+  ggplot(aes(median_consumption, weekday, fill = weekday)) +
+  geom_col() +
+  theme(legend.position = "none") +
+  scale_fill_colorblind()
+```
+
+Vi kan även kolla fördelningen, där vi ser att söndag och måndag har i princip samma fördelning, medan alla andra dagar förutom lördag har i princip samma fördelning.
+
+```{r}
+tds5 %>% 
+  ggplot(aes(consumption_value, color = weekday, fill = weekday)) +
+  geom_density(alpha = 0.2) +
+  scale_color_colorblind() +
+  scale_fill_colorblind()
+```
+
+Linjärt test för tds5
+
+```{r}
+library(mgcv)
+test <- lm(log10(consumption_value) ~ weekday, data = tds5)
+
+summary(test)
+```
+
+linjärt test för tds9
+
+```{r}
+tds9 %>% 
+  mutate(weekday = weekdays(as.Date(consumption_from))) %>% 
+  filter(property == "energy") %>% 
+  lm(consumption_value ~ weekday, data = .) %>% 
+  summary()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
