@@ -8,7 +8,7 @@ output:
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, dpi = 300)
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, dpi = 300)
 ```
 
 I en tidigare Notebook introducerade vi en alternativ algoritm till K2. Den heter `arnold` och är byggd på ett modellramverk som heter  `Generalized Additive Models (GAM)`. Modellen funkar på ungefär samma sätt som K2s nuvarande algoritm. Men istället för att anpassa en bruten linjär regression anpassar vi med hjälp av `GAM` *en* regressionslinje, som inte är linjär. Utöver det använder vi också en mer standardiserade metod än *standardavvikelsen* (som används i K2 idag) för att identifiera larm, den heter `Inter Quartile Range (iqr)`.
@@ -87,7 +87,9 @@ tds5_ref %>%
   )
 ```
 
-`arnold` hanterar det här annorlunda. Istället för att identifiera grupperna i effektsignaturen utgår den från att det här i regel beror på olika konsumtion under olika dagar. 
+`arnold` hanterar det här annorlunda. Istället för att identifiera grupperna i effektsignaturen utgår den från att det här i regel beror på olika konsumtion under olika dagar.
+
+Men det bör dock tilläggas att en referensperiod kan vara nödvändig för `arnold` också. 
 
 ```{r}
 library(ggthemes)
@@ -104,8 +106,10 @@ Vi kan visualisera skillnaden mellan dagar:
 
 ```{r}
 tds5 %>% 
+  mutate(month = lubridate::month(consumption_from)) %>% 
   group_by(weekday) %>% 
-  summarise(median_consumption = median(consumption_value)) %>% 
+  summarise(median_consumption = median(consumption_value),
+            sd = sd(consumption_value)) %>% 
   ggplot(aes(median_consumption, weekday, fill = weekday)) +
   geom_col() +
   theme(legend.position = "none") +
@@ -119,47 +123,58 @@ tds5 %>%
   ggplot(aes(consumption_value, color = weekday, fill = weekday)) +
   geom_density(alpha = 0.2) +
   scale_color_colorblind() +
-  scale_fill_colorblind()
+  scale_fill_colorblind() +
+  scale_x_log10()
 ```
 
-Linjärt test för tds5
+Det här löser vi helt enkelt genom att anpassa en modell per veckodag.
 
 ```{r}
+tds5 %>% 
+  ggplot(aes(temperature, consumption_value, color = weekday)) +
+  geom_point(alpha = 0.7) +
+  scale_color_colorblind() +
+  geom_smooth(method = "gam")
+```
+
+Ett problem som dyker upp här är att modellen i sin grundläggande form är känslig för outliers. Det här är precis skälet till varför vi använder referensperiod i K2. Men i en GAM går det här justera genom att ändra underliggande fördelning till Students T.
+
+```{r}
+library(gratia)
+tds5 <- tds5 %>% 
+  mutate(weekday = as.factor(weekday))
+```
+
+```{r echo=TRUE}
 library(mgcv)
-test <- lm(log10(consumption_value) ~ weekday, data = tds5)
-
-summary(test)
+tds5_model <- gam(consumption_value ~ s(temperature, by = weekday) + weekday,
+                             data = tds5,  method = "REML", family = scat)
 ```
-
-linjärt test för tds9
 
 ```{r}
-tds9 %>% 
-  mutate(weekday = weekdays(as.Date(consumption_from))) %>% 
-  filter(property == "energy") %>% 
-  lm(consumption_value ~ weekday, data = .) %>% 
-  summary()
+tds5_model_df <- tds5 %>% 
+  add_residuals(tds5_model, value = "gam_resid") %>% 
+  add_fitted(tds5_model, value = "gam_fitted") 
+
+tds5_model_df%>% 
+  ggplot(aes(temperature, consumption_value, color = weekday)) +
+  geom_point(alpha = 0.7) +
+  scale_color_colorblind() +
+  geom_line(aes(temperature, gam_fitted))
 ```
 
+I nästa steg identifierar vi outliers/larm med `iqr`.
 
+```{r}
+lm_resid_tds5 <- lm(consumption_value ~ gam_fitted, data = tds5_model_df)
 
+tds5_lm_df <- broom::augment(lm_resid_tds5, tds5_model_df) %>% 
+  mutate(outlier = anomalize::iqr(.resid)) 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+tds5_lm_df %>% 
+  ggplot(aes(x = temperature, y = consumption_value, color = outlier)) +
+  geom_point()
+```
 
 
 

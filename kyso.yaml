@@ -1,0 +1,5 @@
+title: "Hur fungerar Arnold på driftande data?"
+
+description: "Vi undersöker hur algoritmen Arnold fungerar på driftande data"
+
+main: arnold-on-drift.md
